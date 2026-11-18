@@ -1,4 +1,4 @@
-# Gravity Rush for Nintendo Switch 2 (Vita3K-nx port)
+# Gravity Rush for Nintendo Switch 2 (Based on Vita3K-nx port)
 
 A dedicated Switch 2 homebrew build of the [Vita3K](https://vita3k.org) PlayStation Vita emulator,
 based on [Vita3K-nx](https://github.com/NaGaa95/Vita3K-nx) (the Switch 1 port) and tuned to run
