@@ -1,6 +1,6 @@
 #!/bin/sh
 # Packages the Switch 2 Gravity Rush build for a release:
-#   dist/GravityRush-Switch2-<version>.zip
+#   release/GravityRush-Switch2-<version>.zip
 # containing the SD card layout (switch/gravityrush/GravityRush.nro), the
 # README and the licenses of everything linked into the NRO.
 #   scripts/package-switch2-release.sh [build-dir]   (default: build/switch2)
@@ -19,8 +19,8 @@ DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 VERSION="$(git -C "$SRC" describe --tags --always 2>/dev/null || echo dev)"
 git -C "$SRC" diff --quiet --ignore-submodules HEAD 2>/dev/null || VERSION="$VERSION-dirty"
 NAME="GravityRush-Switch2-$VERSION"
-STAGE="$SRC/dist/$NAME"
-rm -rf "$STAGE" "$SRC/dist/$NAME.zip"
+STAGE="$SRC/release/$NAME"
+rm -rf "$STAGE" "$SRC/release/$NAME.zip"
 mkdir -p "$STAGE/switch/gravityrush/lsfg" "$STAGE/licenses/third-party"
 
 # The SD card layout.
@@ -73,6 +73,6 @@ if find "$STAGE" -iname 'Lossless.dll' -o -iname '*.pup' -o -iname 'eboot.bin' -
 	exit 1
 fi
 
-(cd "$SRC/dist" && zip -qr "$NAME.zip" "$NAME")
-echo "$SRC/dist/$NAME.zip"
-(cd "$SRC/dist" && unzip -l "$NAME.zip" | tail -n +4 | head -n -2 | awk '{print $4}' | grep -v '/$')
+(cd "$SRC/release" && zip -qr "$NAME.zip" "$NAME")
+echo "$SRC/release/$NAME.zip"
+(cd "$SRC/release" && unzip -l "$NAME.zip" | tail -n +4 | head -n -2 | awk '{print $4}' | grep -v '/$')

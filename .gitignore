@@ -118,7 +118,7 @@ __pycache__/
 
 # Switch 2 Gravity Rush build: release zips, and files that must never be
 # redistributed (Lossless Scaling, PS Vita firmware and game data).
-/dist/
+/release/
 Lossless.dll
 *.PUP
 *.pup
