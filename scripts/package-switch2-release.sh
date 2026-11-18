@@ -14,7 +14,10 @@ DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 
 [ -f "$NRO" ] || { echo "error: $NRO not found - build it first (ninja -C $BUILD vita3k_nro)" >&2; exit 1; }
 
-VERSION="$(git -C "$SRC" describe --tags --always --dirty 2>/dev/null || echo dev)"
+# Submodules always carry the applied Switch patches, so only the project's own
+# files count towards "-dirty".
+VERSION="$(git -C "$SRC" describe --tags --always 2>/dev/null || echo dev)"
+git -C "$SRC" diff --quiet --ignore-submodules HEAD 2>/dev/null || VERSION="$VERSION-dirty"
 NAME="GravityRush-Switch2-$VERSION"
 STAGE="$SRC/dist/$NAME"
 rm -rf "$STAGE" "$SRC/dist/$NAME.zip"
