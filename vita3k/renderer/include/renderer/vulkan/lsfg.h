@@ -23,8 +23,13 @@ namespace lsfg {
 
 // Lossless Scaling ships these shaders separately. Vita3K never bundles the
 // proprietary DLL; users provide it beside the Switch port's data files.
+#ifdef VITA3K_SWITCH2
+constexpr const char *DLL_PATH = "/switch/gravityrush/lsfg/Lossless.dll";
+constexpr const char *DLL_DISPLAY_PATH = "sdmc:/switch/gravityrush/lsfg/Lossless.dll";
+#else
 constexpr const char *DLL_PATH = "/switch/vita3k/lsfg/Lossless.dll";
 constexpr const char *DLL_DISPLAY_PATH = "sdmc:/switch/vita3k/lsfg/Lossless.dll";
+#endif
 
 void begin_session(bool requested, float flow_scale, bool performance_mode);
 void end_session();

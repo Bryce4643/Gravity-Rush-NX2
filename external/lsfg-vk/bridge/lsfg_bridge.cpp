@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include <cstdio>
 #include "lsfg_bridge.h"
 
 #include "lsfg-vk-backend/lsfgvk.hpp"
@@ -319,10 +320,15 @@ private:
 extern "C" LsfgNxRuntime *lsfg_nx_create(const LsfgNxCreateInfo *info) {
     if (!info) return nullptr;
 
+    // The reason goes to stderr, which the Switch frontend copies into its log.
     try {
         auto runtime = std::make_unique<LsfgNxRuntime>(*info);
         return runtime.release();
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "lsfg: runtime creation failed: %s\n", e.what());
+        return nullptr;
     } catch (...) {
+        std::fprintf(stderr, "lsfg: runtime creation failed: unknown exception\n");
         return nullptr;
     }
 }
@@ -342,7 +348,10 @@ extern "C" bool lsfg_nx_present(LsfgNxRuntime *runtime, VkQueue queue,
     try {
         *result = runtime->present(queue, *presentInfo);
         return true;
+    } catch (const std::exception &e) {
+        std::fprintf(stderr, "lsfg: present failed: %s\n", e.what());
     } catch (...) {
+        std::fprintf(stderr, "lsfg: present failed: unknown exception\n");
     }
 
     *result = VK_ERROR_INITIALIZATION_FAILED;

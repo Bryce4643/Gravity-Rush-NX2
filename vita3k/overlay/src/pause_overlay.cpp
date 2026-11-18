@@ -68,8 +68,13 @@ pause_overlay::pause_overlay() {
         "Trophies",
         "Cheats",
         "Settings",
+#ifdef VITA3K_SWITCH2
+        "Return to homebrew menu",
+        "Quit game",
+#else
         "Return to launcher",
         "Exit emulator",
+#endif
     };
     for (size_t i = 0; i < m_menu_labels.size(); ++i) {
         auto &entry = m_menu_labels[i];

@@ -35,6 +35,9 @@ public:
     void EnableReset(bool reset);
     void ResetRotations();
     void ResetQuaternion();
+    // Starts the orientation again from the current pose (heading zero) and
+    // re-learns the gyro bias: clears accumulated drift.
+    void Recenter();
 
     void UpdateRotation(SceULong64 elapsed_time);
     void UpdateOrientation(SceULong64 elapsed_time);

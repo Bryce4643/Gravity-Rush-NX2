@@ -178,6 +178,12 @@ void run(void *) {
 }
 
 void start() {
+#ifdef VITA3K_SWITCH2
+    // The FPS overlay services (SaltyNX / NX-FPS) are Switch 1 system modules.
+    // Attaching closes the service manager session and talks to their named
+    // ports, which ended the process at startup under kaiHEN.
+    return;
+#endif
     if (running)
         return;
     frame_count.store(0, std::memory_order_relaxed);

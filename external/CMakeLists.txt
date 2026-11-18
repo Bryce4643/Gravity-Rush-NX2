@@ -293,7 +293,9 @@ if(SWITCH)
 	# from this driver), so no loader/dlopen is involved.
 	if(SWITCH_VULKAN_LINK_LIBS)
 		target_link_libraries(vulkan INTERFACE ${SWITCH_VULKAN_LINK_LIBS})
-		add_dependencies(vulkan vita3k_mesa_vulkan_local)
+		if(NOT SWITCH2)
+			add_dependencies(vulkan vita3k_mesa_vulkan_local)
+		endif()
 	endif()
 endif()
 
@@ -315,13 +317,16 @@ if(SWITCH)
 	# cmake/switch.cmake validates the pinned aarch64-none-elf build before this
 	# directory is entered. Imported targets let psvpfstools and all other
 	# consumers share the same static crypto/TLS implementation.
+	if(NOT SWITCH_OPENSSL_LIBDIR)
+		set(SWITCH_OPENSSL_LIBDIR "${SWITCH_OPENSSL_DIR}")
+	endif()
 	add_library(OpenSSL::Crypto STATIC IMPORTED GLOBAL)
 	set_target_properties(OpenSSL::Crypto PROPERTIES
-		IMPORTED_LOCATION "${SWITCH_OPENSSL_DIR}/libcrypto.a"
+		IMPORTED_LOCATION "${SWITCH_OPENSSL_LIBDIR}/libcrypto.a"
 		INTERFACE_INCLUDE_DIRECTORIES "${SWITCH_OPENSSL_DIR}/include")
 	add_library(OpenSSL::SSL STATIC IMPORTED GLOBAL)
 	set_target_properties(OpenSSL::SSL PROPERTIES
-		IMPORTED_LOCATION "${SWITCH_OPENSSL_DIR}/libssl.a"
+		IMPORTED_LOCATION "${SWITCH_OPENSSL_LIBDIR}/libssl.a"
 		INTERFACE_INCLUDE_DIRECTORIES "${SWITCH_OPENSSL_DIR}/include"
 		INTERFACE_LINK_LIBRARIES OpenSSL::Crypto)
 	add_library(crypto INTERFACE)
@@ -428,11 +433,11 @@ if(SWITCH)
 	target_compile_definitions(psvpfsparser PUBLIC PSVPFS_BOOST)
 endif()
 
-if(SWITCH)
+if(SWITCH AND NOT SWITCH2)
 	# Use the devkitPro switch-curl portlib.
 	add_library(libcurl INTERFACE)
 	target_link_libraries(libcurl INTERFACE "${SWITCH_PORTLIBS}/lib/libcurl.a")
-elseif(NOT SWITCH)
+elseif(NOT SWITCH OR SWITCH2)
 find_package(CURL QUIET)
 if(NOT CURL_FOUND)
 	message("System curl not found, compiling curl from source")

@@ -73,7 +73,7 @@ static constexpr u64 align_heap_up(u64 size) {
 // Size newlib's heap from the memory the kernel says this process has rather
 // than whatever hbloader committed: it can leave memory uncommitted on one unit
 // and over-commit on another, so resizing in either direction matters.
-static void switch_configure_heap() {
+[[maybe_unused]] static void switch_configure_heap() {
     u64 total = 0, heap_base = 0, heap_region_size = 0, used_before = 0;
     const Result total_rc = svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
     const Result heap_base_rc = svcGetInfo(&heap_base, InfoType_HeapRegionAddress, CUR_PROCESS_HANDLE, 0);
@@ -226,16 +226,36 @@ bool switch_restore_loader_heap() {
 
 // Phase-A initialisation. Mirrors the Android port's initialize_session(), with
 // a writable SD-card root and read-only static assets from the libnx romfs.
+#ifdef VITA3K_SWITCH2
+extern "C" void switch2_boot_mark(const char *stage);
+#define BOOT_MARK(stage) switch2_boot_mark(stage)
+#else
+#define BOOT_MARK(stage) ((void)0)
+#endif
+
 bool init_switch_session(const fs::path &storage_path, Root &root_paths,
     std::unique_ptr<EmuEnvState> &emuenv, bool install_mode) {
     try {
+#ifdef VITA3K_SWITCH2
+        // The Gravity Rush build's emulated Vita file system, where the game,
+        // its DLC and save data are already installed.
+        const fs::path vita_path = storage_path / "fs" / "";
+#else
         const fs::path vita_path = storage_path / "vita" / "";
+#endif
 
+        BOOT_MARK("session: setting paths");
         // Static (read-only) assets live in the romfs bundled into the .nro.
         root_paths.set_static_assets_path(fs::path("romfs:/"));
         root_paths.set_vita_fs_path(vita_path);
         root_paths.set_log_path(storage_path);
+#ifdef VITA3K_SWITCH2
+        // Its own folder: config.yml next to it belongs to the earlier
+        // Gravity Rush wrapper, whose settings do not suit this build.
+        root_paths.set_config_path(storage_path / "config" / "");
+#else
         root_paths.set_config_path(storage_path);
+#endif
         root_paths.set_shared_path(storage_path);
         root_paths.set_cache_path(storage_path / "cache" / "");
         root_paths.set_patch_path(storage_path / "patch" / "");
@@ -265,17 +285,23 @@ bool init_switch_session(const fs::path &storage_path, Root &root_paths,
         // use_stdout=false: spdlog's stdout sink writes through the libnx software
         // console, which crashes once consoleExit runs or the renderer owns the
         // window. main_switch.cpp later redirects the session to a per-driver log.
+        BOOT_MARK("session: directories created, starting the log");
         if (logging::init(root_paths, false) != Success)
             return false;
+        BOOT_MARK("session: log started");
         // Logging is synchronous on Switch (see logging.cpp) so a hard guest
         // crash cannot lose the last lines naming what was executing.
 
         // Bound the newlib heap so the process leaves headroom; the guest memory
         // pool is later carved from this heap. Install mode never runs guest code,
         // so it reserves nothing - leaving the address space clean for the chainload.
+#ifndef VITA3K_SWITCH2
+        // Switch 2: libounce's allocator (mimalloc) owns the heap the loader
+        // gives the program; resizing it under mimalloc is not allowed.
         if (!install_mode) {
             switch_configure_heap();
         }
+#endif
 
         // OpenSSL 3.x on Horizon does not auto-activate its built-in providers,
         // so EVP_*_fetch("AES-...") returns null and all SCE/PKG decryption fails.
@@ -293,23 +319,43 @@ bool init_switch_session(const fs::path &storage_path, Root &root_paths,
         LOG_INFO("Vita3K Switch port starting up");
         LOG_INFO("Switch frontend restart revision 4 active");
 
+        BOOT_MARK("session: creating the emulator state");
         emuenv = std::make_unique<EmuEnvState>();
 
         Config cfg{};
         char arg0[] = "vita3k";
         char *argv[] = { arg0, nullptr };
+#ifdef VITA3K_SWITCH2
+        const bool first_run = !fs::exists(root_paths.get_config_path() / "config.yml");
+#endif
         if (config::init_config(cfg, 1, argv, root_paths, false) != Success) {
             LOG_ERROR("Failed to initialise config.");
             emuenv.reset();
             return false;
         }
+#ifdef VITA3K_SWITCH2
+        if (first_run) {
+            // Defaults for the Gravity Rush build, written once: an existing
+            // config.yml is never changed.
+            cfg.resolution_multiplier = 2.0f; // tested on Switch 2 hardware
+            cfg.switch_touch_mode = "off"; // stick clicks and ZL/ZR are touch gestures here
+            cfg.switch_rear_touch = "off";
+            cfg.file_logging = true; // warnings and errors, for bug reports
+            cfg.log_level = 3;
+            cfg.switch_lsfg_enabled = false; // needs the user's own Lossless.dll
+            config::serialize_config(cfg, cfg.config_path);
+            LOG_INFO("First run: wrote the Gravity Rush defaults to {}", cfg.config_path);
+        }
+#endif
 
+        BOOT_MARK("session: config loaded, reserving guest memory");
         if (!install_mode) {
             // Reserve the page-table backing before Vulkan and worker threads
             // fragment Horizon's address regions.
             if (!switch_reserve_guest_region())
                 LOG_ERROR("Early guest page-table reservation failed; will retry at game launch");
         }
+        BOOT_MARK("session: guest memory reserved, initialising the app");
 
         fs::create_directories(cfg.get_vita_fs_path());
 
@@ -324,6 +370,7 @@ bool init_switch_session(const fs::path &storage_path, Root &root_paths,
         // (Vulkan, HLE tables, apps/users) that must not exist during the chainload.
         if (install_mode)
             return true;
+        BOOT_MARK("session: app initialised, starting the renderer");
 
         // Avoid loading NVK at launcher startup when the selected global
         // renderer is OpenGL/Zink. A per-game Vulkan override probes lazily in

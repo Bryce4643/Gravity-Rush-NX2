@@ -23,4 +23,5 @@ constexpr int SCE_ERROR_ERRNO_EBUSY = 0x80010010;
 constexpr int SCE_ERROR_ERRNO_EEXIST = 0x80010011; // File exists
 constexpr int SCE_ERROR_ERRNO_EMFILE = 0x80010018; // Too many files are open
 constexpr int SCE_ERROR_ERRNO_EBADFD = 0x80010051; // File descriptor is invalid for this operation
+constexpr int SCE_ERROR_ERRNO_EFAULT = static_cast<int>(0x8001000E); // Bad address
 constexpr int SCE_ERROR_ERRNO_EOPNOTSUPP = 0x8001005F; // Operation not supported

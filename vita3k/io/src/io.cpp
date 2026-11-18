@@ -512,7 +512,12 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
 }
 
 int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, const SceOff offset, const char *export_name) {
-    assert(data != nullptr);
+    if (data == nullptr && size > 0) {
+        // A guest read into a NULL buffer (an allocation the game did not
+        // check) would fault the host: fail it like the Vita does.
+        LOG_ERROR("{}: read of {} bytes from fd {} into a NULL buffer", export_name, size, log_hex(fd));
+        return IO_ERROR(SCE_ERROR_ERRNO_EFAULT);
+    }
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
@@ -563,7 +568,12 @@ int write_file_at(const SceUID fd, const void *data, const SceSize size, const S
 }
 
 int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, const char *export_name) {
-    assert(data != nullptr);
+    if (data == nullptr && size > 0) {
+        // A guest read into a NULL buffer (an allocation the game did not
+        // check) would fault the host: fail it like the Vita does.
+        LOG_ERROR("{}: read of {} bytes from fd {} into a NULL buffer", export_name, size, log_hex(fd));
+        return IO_ERROR(SCE_ERROR_ERRNO_EFAULT);
+    }
     assert(size >= 0);
 
     std::unique_lock<std::mutex> lock(io.file_mutex);

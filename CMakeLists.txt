@@ -28,7 +28,12 @@ include("external/dynarmic/CMakeModules/DetectArchitecture.cmake")
 # add_subdirectory(external).
 if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR NINTENDO_SWITCH)
 	set(SWITCH 1)
-	include("${CMAKE_SOURCE_DIR}/cmake/switch.cmake")
+	if(NINTENDO_SWITCH2)
+		# Switch 2 homebrew (libounce toolchain, which also sets NINTENDO_SWITCH)
+		include("${CMAKE_SOURCE_DIR}/cmake/switch2.cmake")
+	else()
+		include("${CMAKE_SOURCE_DIR}/cmake/switch.cmake")
+	endif()
 endif()
 
 set(CMAKE_CXX_STANDARD 23)

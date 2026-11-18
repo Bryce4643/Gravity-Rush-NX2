@@ -20,6 +20,17 @@ void MotionInput::SetPID(SceFloat new_kp, SceFloat new_ki, SceFloat new_kd) {
     kd = new_kd;
 }
 
+void MotionInput::Recenter() {
+    // Start the orientation again from the current gravity reading (heading
+    // zero) and re-learn the gyro bias, without changing the axes.
+    gyro_bias = {};
+    ResetQuaternion();
+    ResetRotations();
+    integral_error = {};
+    reset_counter = 0;
+    SetOrientationFromAccelerometer();
+}
+
 void MotionInput::SetAcceleration(const Util::Vec3f &acceleration) {
     accel = acceleration;
 

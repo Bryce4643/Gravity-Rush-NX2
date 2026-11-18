@@ -115,3 +115,12 @@ fastlane/readme.md
 
 # Python caches, from running tools/autotests with pytest directly
 __pycache__/
+
+# Switch 2 Gravity Rush build: release zips, and files that must never be
+# redistributed (Lossless Scaling, PS Vita firmware and game data).
+/dist/
+Lossless.dll
+*.PUP
+*.pup
+*.psarc
+eboot.bin

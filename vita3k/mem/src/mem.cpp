@@ -42,6 +42,9 @@
 // Access-violation-driven features (fault-based lazy commit, GPU write-protection
 // sync) are unavailable — memory is committed explicitly at allocation time.
 #include <switch.h>
+#ifdef VITA3K_SWITCH2
+#include <switch2/memory/heap.h>
+#endif
 #ifdef BIT
 #undef BIT
 #endif
@@ -339,8 +342,13 @@ bool switch_reserve_guest_region() {
     u64 total_memory = 0, heap_base = 0;
     svcGetInfo(&total_memory, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
     svcGetInfo(&heap_base, InfoType_HeapRegionAddress, CUR_PROCESS_HANDLE, 0);
+#ifdef VITA3K_SWITCH2
+    // libounce: malloc is mimalloc over the loader's heap, not newlib's.
+    const u64 committed_heap = heapGetTotalSize();
+#else
     const u64 heap_end = reinterpret_cast<u64>(fake_heap_end);
     const u64 committed_heap = heap_end > heap_base ? heap_end - heap_base : 0;
+#endif
     constexpr u64 MIN_POOL = 0x20000000; // 512 MiB hard minimum
     constexpr u64 PREFERRED_POOL_MIN = 0x30000000; // 768 MiB on stock memory
     constexpr u64 PREFERRED_POOL_MAX = 0x50000000; // 1.25 GiB on RAM mods

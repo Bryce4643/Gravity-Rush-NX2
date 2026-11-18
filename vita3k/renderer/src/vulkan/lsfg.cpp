@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vita3K team
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <util/log.h>
 #include <renderer/vulkan/lsfg.h>
 #include <renderer/vulkan/state.h>
 
@@ -67,6 +68,7 @@ void DestroyRuntimeLocked()
 
 void DisableSessionLocked(const char* reason)
 {
+  LOG_WARN("LSFG unavailable: {}", reason ? reason : "(no reason)");
   DestroyRuntimeLocked();
   s_state.enabled.store(false, std::memory_order_release);
   s_state.available.store(false, std::memory_order_release);
@@ -156,17 +158,26 @@ void begin_session(bool requested, float flow_scale, bool performance_mode)
   if (!requested)
   {
     s_state.status = "Disabled in the launcher";
+    LOG_INFO("LSFG: {}", s_state.status);
     return;
   }
   if (!dll_installed)
   {
     s_state.status = "Lossless.dll is missing";
+    LOG_WARN("LSFG: {} ({})", s_state.status, DLL_PATH);
     return;
   }
 
 
   s_state.prepared.store(true, std::memory_order_release);
+#ifdef VITA3K_SWITCH2
+  // Gravity Rush build: on from the start when enabled in the config; the
+  // quick menu still turns it off.
+  s_state.enabled.store(true, std::memory_order_release);
+  s_state.status = "Prepared; frame generation starts with the game";
+#else
   s_state.status = "Prepared; enable it from the in-game quick menu";
+#endif
 }
 
 void end_session()
@@ -211,6 +222,7 @@ bool register_swapchain(VKState& state, vk::SwapchainKHR swapchain,
   if (!state.device || !state.general_queue || !swapchain || extent.width == 0 ||
       extent.height == 0 || images.size() < 3)
   {
+    LOG_WARN("LSFG: swapchain has {} images, {}x{}", images.size(), extent.width, extent.height);
     DisableSessionLocked("The Vulkan swapchain is not compatible with LSFG");
     return false;
   }
@@ -223,6 +235,7 @@ bool register_swapchain(VKState& state, vk::SwapchainKHR swapchain,
     s_state.images.push_back(static_cast<VkImage>(image));
   ResetRateTrackingLocked();
   s_state.available.store(true, std::memory_order_release);
+  LOG_INFO("LSFG: swapchain registered ({}x{}, {} images)", extent.width, extent.height, images.size());
   s_state.status = s_state.enabled.load(std::memory_order_acquire) ?
                        "Available; frame generation will resume" :
                        "Available; currently Off";
@@ -366,16 +379,19 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
       s_state.enabled.store(false, std::memory_order_release);
       s_state.available.store(false, std::memory_order_release);
       s_state.status = "LSFG initialization failed";
+      LOG_ERROR("LSFG: initialization failed (lsfg_nx_create returned null; shaders from {})", DLL_PATH);
       // Creation did not consume the render-finished semaphore.
       return PresentNormally(state, present_info);
     }
     s_state.status = "Frame generation On";
+    LOG_INFO("LSFG: frame generation running");
   }
 
   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
   if (!lsfg_nx_present(s_state.runtime, queue, &raw_present_info, &result))
   {
     s_state.status = "LSFG rejected the active swapchain";
+    LOG_ERROR("LSFG: {}", s_state.status);
     s_state.enabled.store(false, std::memory_order_release);
     s_state.available.store(false, std::memory_order_release);
     DestroyRuntimeLocked();
@@ -386,6 +402,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
   if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
   {
     s_state.status = "LSFG presentation failed; recreating the swapchain";
+    LOG_ERROR("LSFG: presentation failed ({})", static_cast<int>(result));
     s_state.enabled.store(false, std::memory_order_release);
     s_state.available.store(false, std::memory_order_release);
     DestroyRuntimeLocked();

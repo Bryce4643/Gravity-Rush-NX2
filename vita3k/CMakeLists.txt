@@ -225,11 +225,13 @@ elseif(SWITCH)
 	# more than that, and libstdc++'s __cxa_thread_atexit path does not handle an
 	# exhausted key table safely. Route the four key APIs through the Switch TLS
 	# multiplexer so they share one native libnx slot.
-	target_link_options(vita3k PRIVATE
-		-Wl,--wrap=pthread_key_create
-		-Wl,--wrap=pthread_key_delete
-		-Wl,--wrap=pthread_getspecific
-		-Wl,--wrap=pthread_setspecific)
+	if(NOT SWITCH2) # libounce's own pthread keys are used on Switch 2
+		target_link_options(vita3k PRIVATE
+			-Wl,--wrap=pthread_key_create
+			-Wl,--wrap=pthread_key_delete
+			-Wl,--wrap=pthread_getspecific
+			-Wl,--wrap=pthread_setspecific)
+	endif()
 else()
 	add_executable(vita3k MACOSX_BUNDLE main.cpp interface.cpp interface.h performance.cpp)
 endif()
@@ -252,6 +254,14 @@ if(SWITCH)
 	# already appends -lnx via NX_STANDARD_LIBRARIES, but the renderer/JIT also use
 	# libnx APIs (nwindow, jit, applet), so make the dependency explicit.
 	target_link_libraries(vita3k PRIVATE nx)
+	if(SWITCH2)
+		# kaiHEN JIT publishing (libkaihen is a linker script that also pulls
+		# kaihen-jit.o, so it is linked exactly once, here).
+		target_link_libraries(vita3k PRIVATE -lkaihen)
+		target_sources(vita3k PRIVATE "${SWITCH2_DIR}/egl_stubs.c" "${SWITCH2_DIR}/vulkan_icd.c" "${SWITCH2_DIR}/diagnostics.cpp"
+			"${SWITCH2_DIR}/boot_marks.c" "${SWITCH2_DIR}/system_font.cpp")
+		target_link_options(vita3k PRIVATE -Wl,--wrap=abort)
+	endif()
 	if(SWITCH_VULKAN_LINK_DEPENDS)
 		set_property(TARGET vita3k APPEND PROPERTY LINK_DEPENDS ${SWITCH_VULKAN_LINK_DEPENDS})
 	endif()
@@ -270,17 +280,30 @@ if(SWITCH)
 		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/vita3k/icons" "${VITA3K_SWITCH_ROMFS}/icons"
 		COMMENT "Staging Switch romfs (data + builtin shaders + icons)")
 
-	nx_generate_nacp(
-		OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
-		NAME "Vita3K"
-		AUTHOR "Vita3K team"
-		VERSION "${VITA3K_APP_VERSION}")
+	if(SWITCH2)
+		# Dedicated Gravity Rush build: replaces the earlier wrapper's NRO.
+		nx_generate_nacp(
+			OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
+			NAME "Gravity Rush"
+			AUTHOR "Vita3K team (Vita3K-nx Switch 2 build)"
+			VERSION "${VITA3K_APP_VERSION}")
+		set(VITA3K_NRO_NAME "GravityRush.nro")
+		set(VITA3K_NRO_ICON "${SWITCH2_DIR}/icon.jpg")
+	else()
+		nx_generate_nacp(
+			OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
+			NAME "Vita3K"
+			AUTHOR "Vita3K team"
+			VERSION "${VITA3K_APP_VERSION}")
+		set(VITA3K_NRO_NAME "Vita3K.nro")
+		set(VITA3K_NRO_ICON "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.jpg")
+	endif()
 
 	nx_create_nro(vita3k
 		NACP "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
-		ICON "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.jpg"  # elf2nro requires a 256x256 JPEG
+		ICON "${VITA3K_NRO_ICON}"  # elf2nro requires a 256x256 JPEG
 		ROMFS "${VITA3K_SWITCH_ROMFS}"
-		OUTPUT "${CMAKE_BINARY_DIR}/Vita3K.nro")
+		OUTPUT "${CMAKE_BINARY_DIR}/${VITA3K_NRO_NAME}")
 endif()
 if(USE_DISCORD_RICH_PRESENCE)
 	target_link_libraries(vita3k PRIVATE discord-rpc)

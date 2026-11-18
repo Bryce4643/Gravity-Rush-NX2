@@ -36,6 +36,9 @@
 #include <util/log.h>
 #include <util/string_utils.h>
 
+#include <atomic>
+#include <algorithm>
+#include <mutex>
 #include <unordered_set>
 
 static constexpr bool LOG_UNK_NIDS_ALWAYS = false;
@@ -148,6 +151,24 @@ static void log_import_call(char emulation_level, uint32_t nid, SceUID thread_id
     }
 }
 
+
+// Watch for comparing platforms: logs every change of the guest words at
+// 0x815f7960..0x815f797f (the FIOS state Gravity Rush diverges on), noting the
+// thread and the import being entered or left. On with the import trace.
+static void watch_fios_state(EmuEnvState &emuenv, const char *thread, const char *where, const char *import) {
+    static std::mutex mutex;
+    static uint32_t last[8] = { 0xdeadbeef, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef, 0xdeadbeef };
+    if (!is_valid_addr(emuenv.mem, 0x815f7960))
+        return;
+    const uint32_t *now = Ptr<uint32_t>(0x815f7960).get(emuenv.mem);
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (std::equal(now, now + 8, last))
+        return;
+    LOG_INFO("[watch] {} {} {}: {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x}", thread, where, import,
+        now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7]);
+    std::copy(now, now + 8, last);
+}
+
 void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id) {
     // HLE - call our C++ function
     if (emuenv.kernel.debugger.watch_import_calls) {
@@ -161,6 +182,25 @@ void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread
     }
     const ImportFn *fn = resolve_import(nid);
     if (fn) {
+        // Import trace for comparing platforms: thread, import, r0-r3 on
+        // entry and r0 on return, one line per call. On when
+        // <log path>/import_trace.txt exists; stops after 30000 calls.
+        static const bool trace_imports = fs::exists(emuenv.log_path / "import_trace.txt");
+        static std::atomic<int> traced{ 0 };
+        if (trace_imports && traced.load(std::memory_order_relaxed) < 30000) {
+            traced.fetch_add(1, std::memory_order_relaxed);
+            const uint32_t a0 = read_reg(cpu, 0), a1 = read_reg(cpu, 1), a2 = read_reg(cpu, 2), a3 = read_reg(cpu, 3);
+            {
+                const ThreadStatePtr t = emuenv.kernel.get_thread(thread_id);
+                watch_fios_state(emuenv, t ? t->name.c_str() : "?", "enter", import_name(nid));
+            }
+            (*fn)(emuenv, cpu, thread_id);
+            const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+            watch_fios_state(emuenv, thread ? thread->name.c_str() : "?", "leave", import_name(nid));
+            LOG_INFO("[imp] {} {} {:x} {:x} {:x} {:x} -> {:x}", thread ? thread->name : std::string("?"), import_name(nid),
+                a0, a1, a2, a3, read_reg(cpu, 0));
+            return;
+        }
         (*fn)(emuenv, cpu, thread_id);
     } else {
         const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);

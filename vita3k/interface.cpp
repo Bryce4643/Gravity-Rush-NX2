@@ -34,6 +34,7 @@
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
+#include <rtc/rtc.h>
 #include <lang/state.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
@@ -512,6 +513,11 @@ static void load_cheats(EmuEnvState &emuenv, const SceKernelModuleInfo &module_i
 }
 
 static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
+    // The process starts here, with no guest code run yet: emulator startup
+    // (tens of seconds on a console, mostly setting up guest memory) is not
+    // process time. Gravity Rush's file scheduler (FIOS) bases decisions on
+    // the process clock and took a failing path when it started 25 s in.
+    emuenv.kernel.start_tick = rtc_get_ticks(emuenv.kernel.base_tick.tick);
     const auto call_import = [&emuenv](CPUState &cpu, uint32_t nid, SceUID thread_id) {
         ::call_import(emuenv, cpu, nid, thread_id);
     };

@@ -43,6 +43,7 @@
 #include <overlay/display_manager.h>
 #include <overlay/pause_overlay.h>
 #include <renderer/functions.h>
+#include <config/settings.h>
 #include <renderer/vulkan/lsfg.h>
 #include <renderer/frame_host.h>
 #include <renderer/state.h>
@@ -75,11 +76,18 @@
 #include <cstdlib>
 #include <cerrno>
 #include <fstream>
+#include <iterator>
+#include <sstream>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
+
+#ifdef VITA3K_SWITCH2
+std::vector<std::string> switch2_system_font_dirs();
+#endif
 
 namespace {
 
@@ -243,7 +251,11 @@ public:
     std::vector<std::string> font_dirs() const override {
         // The Vita firmware font (pfs) lives under the emulated vita fs; the
         // overlay falls back to its built-in glyphs if none is found.
+#ifdef VITA3K_SWITCH2
+        return switch2_system_font_dirs();
+#else
         return {};
+#endif
     }
 
     void *get_proc_address(const char *name) const override {
@@ -473,6 +485,25 @@ struct VirtualMouseState {
     bool pressed = false;
     bool was_pressed = false;
     std::shared_ptr<VirtualMouseCursor> cursor;
+    // Stick pointer (R3): the first click shows the cursor and the right stick
+    // aims it; the second click is the tap, held while R3 is, and releasing
+    // it lifts the finger and hides the cursor.
+    bool stick_mode = false;
+    bool stick_tapping = false;
+    // Shows or hides the cursor (run_game's set_virtual_mouse).
+    std::function<void(bool)> show;
+
+    // Touch gestures for docked play (Gravity Rush's evade and slide):
+    // ZR + left stick direction swipes the screen that way, ZL + ZR held
+    // keeps two fingers down. The fingers are set for the current frame.
+    int gesture_fingers = 0;
+    float gesture_x[2]{}, gesture_y[2]{};
+    int zr_wait = -1; // frames ZR has waited for ZL (a slide) before swiping
+    int swipe_frame = -1; // progress of the current swipe, or -1
+    float swipe_dx = 0.0f, swipe_dy = 0.0f;
+    static constexpr int SWIPE_FRAMES = 6; // about 100 ms
+    static constexpr int SLIDE_WAIT_FRAMES = 4; // ZL may follow ZR this late
+    static constexpr uint32_t gesture_finger_id = 0x4001;
 
     // Well above the panel's own finger ids, which libnx numbers from zero.
     static constexpr uint32_t finger_id = 0x4000;
@@ -542,6 +573,15 @@ static void switch_poll_touch(EmuEnvState &emuenv, SwitchTouchTracker &tracker, 
         cur[cur_n++] = VirtualMouseState::finger_id;
     }
     vmouse.was_pressed = pointer_down;
+    for (int g = 0; g < vmouse.gesture_fingers && accept_input && cur_n < 8; g++) {
+        const uint32_t fid = VirtualMouseState::gesture_finger_id + g;
+        bool was_down = false;
+        for (int j = 0; j < tracker.previous_count; j++)
+            if (tracker.previous[j] == fid)
+                was_down = true;
+        inject(was_down ? SDL_EVENT_FINGER_MOTION : SDL_EVENT_FINGER_DOWN, fid, vmouse.gesture_x[g], vmouse.gesture_y[g]);
+        cur[cur_n++] = fid;
+    }
 
     // Up for fingers that were down last frame but are gone now.
     for (int j = 0; j < tracker.previous_count; j++) {
@@ -630,7 +670,76 @@ static void clear_switch_controller_input(EmuEnvState &emuenv) {
     emuenv.ctrl.keyboard_state = {};
 }
 
+// Final axis mapping for a held-flat controller (Pro Controller / Joy-Con
+// grip), applied to the gyro and accelerometer separately. Each output axis
+// takes a signed input axis: "gyro = +0 +2 +1" swaps the gyro's Y and Z.
+// Read from sdmc:/switch/gravityrush/motion.txt, and again whenever its text
+// changes (the console's FTP server leaves no usable modification time), so
+// the mapping can be tuned while playing.
+struct MotionAxisMap {
+    // Yaw and roll swapped, yaw reversed: tested with a Pro Controller, docked.
+    std::array<int, 3> gyro_axis{ 0, 2, 1 };
+    std::array<float, 3> gyro_sign{ 1, 1, -1 };
+    std::array<int, 3> accel_axis{ 0, 1, 2 };
+    std::array<float, 3> accel_sign{ 1, 1, 1 };
+
+    static bool parse(const std::string &text, std::array<int, 3> &axis, std::array<float, 3> &sign) {
+        std::array<int, 3> a{};
+        std::array<float, 3> s{};
+        size_t pos = 0;
+        for (int i = 0; i < 3; i++) {
+            pos = text.find_first_of("+-", pos);
+            if (pos == std::string::npos || pos + 1 >= text.size() || text[pos + 1] < '0' || text[pos + 1] > '2')
+                return false;
+            s[i] = text[pos] == '-' ? -1.0f : 1.0f;
+            a[i] = text[pos + 1] - '0';
+            pos += 2;
+        }
+        axis = a;
+        sign = s;
+        return true;
+    }
+
+    // Re-reads the file every couple of seconds and applies it when its text
+    // has changed.
+    void refresh() {
+        static constexpr const char *PATH = "sdmc:/switch/gravityrush/motion.txt";
+        if (++polls % 120 != 1)
+            return;
+        std::ifstream file(PATH);
+        if (!file)
+            return;
+        const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (text == loaded_text)
+            return;
+        loaded_text = text;
+        std::istringstream lines(text);
+        std::string line;
+        while (std::getline(lines, line)) {
+            if (line.rfind("gyro", 0) == 0)
+                parse(line.substr(4), gyro_axis, gyro_sign);
+            else if (line.rfind("accel", 0) == 0)
+                parse(line.substr(5), accel_axis, accel_sign);
+        }
+        LOG_INFO("Motion mapping: gyro {}{} {}{} {}{}, accel {}{} {}{} {}{}",
+            gyro_sign[0] < 0 ? '-' : '+', gyro_axis[0], gyro_sign[1] < 0 ? '-' : '+', gyro_axis[1], gyro_sign[2] < 0 ? '-' : '+', gyro_axis[2],
+            accel_sign[0] < 0 ? '-' : '+', accel_axis[0], accel_sign[1] < 0 ? '-' : '+', accel_axis[1], accel_sign[2] < 0 ? '-' : '+', accel_axis[2]);
+    }
+
+    void apply(int type, float data[3]) const {
+        const auto &axis = type == SDL_SENSOR_GYRO ? gyro_axis : accel_axis;
+        const auto &sign = type == SDL_SENSOR_GYRO ? gyro_sign : accel_sign;
+        const float in[3] = { data[0], data[1], data[2] };
+        for (int i = 0; i < 3; i++)
+            data[i] = sign[i] * in[axis[i]];
+    }
+
+    uint64_t polls = 0;
+    std::string loaded_text;
+};
+
 struct SwitchSixAxis {
+    MotionAxisMap axis_map;
     std::array<HidSixAxisSensorHandle, 6> handles{};
     std::array<bool, 6> active{};
     bool configured = false;
@@ -735,7 +844,10 @@ struct SwitchSixAxis {
         // Convert libnx axes (right, down, into screen) to SDL axes (right, up, out).
         // Handheld input also cancels Vita3K's gamepad rotation to match the console.
         // Convert acceleration from g to m/s^2 and angular velocity from rev/s to rad/s.
-        const bool handheld = handle_index == 0;
+        // A Pro Controller is held flat, which is how the Vita is held upright:
+        // its yaw is the Vita's yaw. Map it like the handheld console, or yaw
+        // and roll come out swapped.
+        const bool handheld = handle_index == 0 || handle_index == 1;
         const auto send = [&](int type, const HidVector &source, float scale) {
             SDL_GamepadSensorEvent event{};
             event.type = SDL_EVENT_GAMEPAD_SENSOR_UPDATE;
@@ -754,8 +866,11 @@ struct SwitchSixAxis {
             // The shared gamepad mapping sends SDL Y to the Vita roll axis.
             if (type == SDL_SENSOR_GYRO)
                 event.data[1] = -event.data[1];
+            if (handle_index == 1)
+                axis_map.apply(type, event.data);
             handle_motion_event(emuenv, type, event);
         };
+        axis_map.refresh();
         send(SDL_SENSOR_ACCEL, sensor.acceleration, SDL_STANDARD_GRAVITY);
         constexpr float radians_per_revolution = 6.28318530717958647692f;
         send(SDL_SENSOR_GYRO, sensor.angular_velocity, radians_per_revolution);
@@ -835,12 +950,91 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
     six_axis.poll(emuenv, pad);
     u64 held = frame.held;
 
+    // L3 recenters motion: the controller's pose now becomes the neutral one.
+    if (frame.down & HidNpadButton_StickL) {
+        std::lock_guard<std::mutex> motion_lock(emuenv.motion.mutex);
+        emuenv.motion.motion_data.Recenter();
+        LOG_INFO("Motion recentred (L3)");
+    }
+
+    // R3: touch pointer for docked play (see VirtualMouseState).
+    if (vmouse.stick_mode && vmouse.stick_tapping && !(frame.held & HidNpadButton_StickR)) {
+        // Tap released: the finger lifts and the cursor goes away.
+        vmouse.stick_mode = false;
+        vmouse.stick_tapping = false;
+        if (vmouse.show)
+            vmouse.show(false);
+    } else if (frame.down & HidNpadButton_StickR) {
+        if (!vmouse.enabled) {
+            vmouse.stick_mode = true;
+            vmouse.stick_tapping = false;
+            if (vmouse.show)
+                vmouse.show(true);
+        } else if (vmouse.stick_mode) {
+            vmouse.stick_tapping = true;
+        }
+    }
+    // The Vita has no stick clicks: they are the frontend's.
+    held &= ~(HidNpadButton_StickL | HidNpadButton_StickR);
+
+    // Touch gestures (see VirtualMouseState). ZL and ZR are the gestures'
+    // alone: the Vita has no such buttons.
+    {
+        const bool zl = (frame.held & HidNpadButton_ZL) != 0;
+        const bool zr = (frame.held & HidNpadButton_ZR) != 0;
+        vmouse.gesture_fingers = 0;
+        const auto start_swipe = [&] {
+            const HidAnalogStickState stick = padGetStickPos(&pad, 0);
+            const float sx = static_cast<float>(stick.x) / 32767.0f;
+            const float sy = static_cast<float>(stick.y) / 32767.0f;
+            if (sx * sx + sy * sy < 0.25f)
+                return; // no direction, no swipe
+            // Snap to up/down/left/right. Screen Y grows downwards.
+            if (std::fabs(sx) >= std::fabs(sy)) {
+                vmouse.swipe_dx = sx > 0 ? 1.0f : -1.0f;
+                vmouse.swipe_dy = 0.0f;
+            } else {
+                vmouse.swipe_dx = 0.0f;
+                vmouse.swipe_dy = sy > 0 ? -1.0f : 1.0f;
+            }
+            vmouse.swipe_frame = 0;
+        };
+        if (zl && zr) {
+            // Slide: two fingers held side by side.
+            vmouse.zr_wait = -1;
+            vmouse.swipe_frame = -1;
+            vmouse.gesture_fingers = 2;
+            vmouse.gesture_x[0] = 0.4f;
+            vmouse.gesture_x[1] = 0.6f;
+            vmouse.gesture_y[0] = vmouse.gesture_y[1] = 0.6f;
+        } else {
+            if ((frame.down & HidNpadButton_ZR) && !zl)
+                vmouse.zr_wait = 0;
+            if (vmouse.zr_wait >= 0) {
+                if (!zr || ++vmouse.zr_wait >= VirtualMouseState::SLIDE_WAIT_FRAMES) {
+                    vmouse.zr_wait = -1;
+                    start_swipe();
+                }
+            }
+            if (vmouse.swipe_frame >= 0) {
+                // From the centre, a third of the screen in the direction.
+                const float t = static_cast<float>(vmouse.swipe_frame) / VirtualMouseState::SWIPE_FRAMES;
+                vmouse.gesture_fingers = 1;
+                vmouse.gesture_x[0] = 0.5f + vmouse.swipe_dx * 0.3f * t;
+                vmouse.gesture_y[0] = 0.5f + vmouse.swipe_dy * 0.3f * t;
+                if (++vmouse.swipe_frame > VirtualMouseState::SWIPE_FRAMES)
+                    vmouse.swipe_frame = -1; // the finger lifts next frame
+            }
+        }
+        held &= ~(HidNpadButton_ZL | HidNpadButton_ZR);
+    }
+
     if (vmouse.enabled) {
         // Full deflection crosses the screen in about a second and a half, which
         // is quick enough to be useful and slow enough to hit a menu entry.
         constexpr float pointer_speed = 0.7f;
         constexpr float pointer_deadzone = 0.15f;
-        const HidAnalogStickState stick = padGetStickPos(&pad, 0);
+        const HidAnalogStickState stick = padGetStickPos(&pad, vmouse.stick_mode ? 1 : 0);
         float sx = static_cast<float>(stick.x) / 32767.0f;
         float sy = static_cast<float>(stick.y) / 32767.0f;
         const float magnitude = std::sqrt(sx * sx + sy * sy);
@@ -852,14 +1046,16 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
             // The stick's Y grows upwards, the screen's downwards.
             vmouse.y = std::clamp(vmouse.y - sy * scale * step, 0.0f, 1.0f);
         }
-        vmouse.pressed = (held & VIRTUAL_MOUSE_CLICK_BUTTONS) != 0;
+        vmouse.pressed = vmouse.stick_mode ? (vmouse.stick_tapping && (frame.held & HidNpadButton_StickR) != 0)
+                                           : (held & VIRTUAL_MOUSE_CLICK_BUTTONS) != 0;
         if (vmouse.cursor) {
             vmouse.cursor->set_position(vmouse.x, vmouse.y);
             vmouse.cursor->set_pressed(vmouse.pressed);
         }
         // The claimed buttons never reach the mapping below, and the left stick
         // is zeroed after it so the guest sees a centred stick.
-        held &= ~VIRTUAL_MOUSE_CLICK_BUTTONS;
+        if (!vmouse.stick_mode)
+            held &= ~VIRTUAL_MOUSE_CLICK_BUTTONS;
     }
 
     const auto touch_presses = touch_mapping::pressed_bindings(emuenv.touch.button_touch_bindings, held, TOUCH_BUTTONS);
@@ -927,8 +1123,11 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
     }
 
     HidAnalogStickState left = padGetStickPos(&pad, 0);
-    const HidAnalogStickState right = padGetStickPos(&pad, 1);
-    if (vmouse.enabled)
+    HidAnalogStickState right = padGetStickPos(&pad, 1);
+    // The stick that moves the pointer is not the game's meanwhile.
+    if (vmouse.enabled && vmouse.stick_mode)
+        right = HidAnalogStickState{};
+    else if (vmouse.enabled)
         left = HidAnalogStickState{};
 
     std::lock_guard<std::mutex> lock(emuenv.ctrl.mutex);
@@ -1257,6 +1456,7 @@ enum LiveSetting {
     LIVE_PERF_OVERLAY,
     LIVE_PERF_DETAIL,
     LIVE_PERF_POSITION,
+    LIVE_FRAME_GEN,
     LIVE_SETTING_COUNT,
 };
 
@@ -1322,6 +1522,11 @@ static std::vector<overlay::list_row> build_live_setting_rows(EmuEnvState &emuen
     rows[LIVE_PERF_POSITION].primary = "Overlay position";
     rows[LIVE_PERF_POSITION].value = position_names[static_cast<size_t>(position)];
     rows[LIVE_PERF_POSITION].dimmed = !emuenv.cfg.performance_overlay;
+
+    // Off by default: it needs the user's own Lossless.dll, and not everyone
+    // likes generated frames. Saved; takes effect from the next launch.
+    rows[LIVE_FRAME_GEN].primary = "Frame generation (next launch)";
+    rows[LIVE_FRAME_GEN].value = on_off(cc.switch_lsfg_enabled);
 
     return rows;
 }
@@ -1390,6 +1595,14 @@ static bool adjust_live_setting(EmuEnvState &emuenv, int index, int direction) {
             return false;
         emuenv.cfg.performance_overlay_position = cycle(emuenv.cfg.performance_overlay_position, 6);
         app::sync_perf_overlay_config(emuenv);
+        break;
+    case LIVE_FRAME_GEN:
+        cc.switch_lsfg_enabled = !cc.switch_lsfg_enabled;
+        // Turning it off also stops it now; turning it on needs a restart
+        // (the session is prepared when the game starts).
+        if (!cc.switch_lsfg_enabled && renderer::vulkan::lsfg::is_enabled())
+            renderer::vulkan::lsfg::request_enabled(false);
+        config::save_current_config(emuenv.cfg, emuenv.config_path, {});
         break;
     default:
         return false;
@@ -1619,6 +1832,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                 virtual_mouse.cursor.reset();
             }
         };
+        virtual_mouse.show = set_virtual_mouse;
         switch_start_preemption_watchdog(*emuenv);
 
         // Guest process time must not advance while the session is stopped:
@@ -1994,18 +2208,36 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
 } // namespace
 
+#ifdef VITA3K_SWITCH2
+void switch2_diagnostics_start();
+void switch2_diagnostics_stop();
+extern "C" void switch2_boot_mark(const char *stage);
+#define BOOT_MARK(stage) switch2_boot_mark(stage)
+#else
+#define BOOT_MARK(stage) ((void)0)
+#endif
+
 int main(int argc, char *argv[]) {
+    BOOT_MARK("main entered");
     // Keep everything off core 3 (Horizon reserves it for the OS: HID, fs, display,
     // scheduler). A title-takeover homebrew is otherwise allowed to use it, and any
     // busy thread there starves the system and hard-locks the console.
     switch_pin_to_app_cores("main thread");
+    BOOT_MARK("pinned to app cores");
 
     // libnx runtime: romfs (bundled static assets) + sockets (net/http).
     romfsInit();
+    BOOT_MARK("romfs mounted");
     socketInitializeDefault();
+    BOOT_MARK("sockets initialised");
     SDL_SetMainReady();
 
+#ifdef VITA3K_SWITCH2
+    // Gravity Rush build: everything lives in the wrapper's own folder.
+    const fs::path storage_path = fs::path("sdmc:/switch/gravityrush/") / "";
+#else
     const fs::path storage_path = fs::path("sdmc:/switch/vita3k/") / "";
+#endif
 
     // Detect install mode up front: it takes a lightweight init path (no guest
     // memory pool, no Vulkan, no threads) so nothing heavyweight survives the
@@ -2023,12 +2255,13 @@ int main(int argc, char *argv[]) {
 
     if (!install_mode)
         switch_overlay::start();
+    BOOT_MARK("overlay started");
     auto &session = switch_session_state();
     if (!init_switch_session(storage_path, session.root_paths, session.emuenv, install_mode)) {
         switch_overlay::stop();
         // Fall back to an on-screen console so the failure is visible on device.
         consoleInit(nullptr);
-        printf("Vita3K: initialisation failed. Check sdmc:/switch/vita3k/logs.\n");
+        printf("Vita3K: initialisation failed. Check the log in %s.\n", storage_path.c_str());
         printf("Press + to exit.\n");
         PadState pad;
         padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -2055,7 +2288,11 @@ int main(int argc, char *argv[]) {
     // game needs - skip it in install mode, whose emuenv has no such subsystems.
     if (!install_mode)
         session.app_session_controller = std::make_unique<app::AppSessionController>(*session.emuenv);
+    BOOT_MARK("session initialised");
     LOG_INFO("Vita3K Switch session initialised.");
+#ifdef VITA3K_SWITCH2
+    switch2_diagnostics_start();
+#endif
     LOG_INFO("[boot] install_mode={} return='{}' nextload_available={} argc={}",
         install_mode, return_path, envHasNextLoad(), argc);
 
@@ -2113,14 +2350,41 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+#ifdef VITA3K_SWITCH2
+    // Dedicated build: always Gravity Rush (USA), unless -r names another title.
+    std::string title_id = "PCSA00011";
+    for (int i = 0; i + 1 < argc; i++) {
+        if (std::string(argv[i]) == "-r")
+            title_id = argv[i + 1];
+    }
+    if (!fs::exists(storage_path / "fs" / "ux0" / "app" / title_id / "eboot.bin")) {
+        consoleInit(nullptr);
+        printf("Gravity Rush (%s) is not installed.\n\n", title_id.c_str());
+        printf("Expected: %sfs/ux0/app/%s/\n\n", storage_path.c_str(), title_id.c_str());
+        printf("Press + to exit.\n");
+        PadState pad;
+        padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+        padInitializeDefault(&pad);
+        while (appletMainLoop()) {
+            padUpdate(&pad);
+            if (padGetButtonsDown(&pad) & HidNpadButton_Plus)
+                break;
+            consoleUpdate(nullptr);
+        }
+        consoleExit(nullptr);
+        title_id.clear();
+    }
+#else
     // Title from -r/autoboot.txt, otherwise show the on-screen picker.
     std::string title_id = resolve_title_id(argc, argv);
     if (title_id.empty())
         title_id = select_title_from_menu();
+#endif
 
     int exit_code = 0;
     SwitchRunResult run_result{};
     if (!title_id.empty()) {
+        BOOT_MARK("starting the game");
         NWindow *nwindow = nwindowGetDefault();
         run_result = run_game(title_id, nwindow);
         exit_code = run_result.exit_code;
@@ -2185,8 +2449,15 @@ int main(int argc, char *argv[]) {
     // A HOME/quick-menu Exit request must instead leave the Application. In the
     // installed-forwarder case, restart the whole Application so hbloader never
     // has to remap the launcher in Vita3K's modified process.
+#ifdef VITA3K_SWITCH2
+    // No launcher to return to: the process ends and hbloader shows the
+    // homebrew menu again.
+    const bool wants_launcher = false;
+    run_result.action = SwitchFrontendAction::None;
+#else
     const bool wants_launcher = run_result.action == SwitchFrontendAction::ReturnToLauncher
         || (run_result.action == SwitchFrontendAction::None && !run_result.title_id.empty());
+#endif
 
     if (wants_launcher) {
         bool clean_restart_ready = current_forwarder_targets(return_path);
@@ -2236,6 +2507,9 @@ int main(int argc, char *argv[]) {
             envSetNextLoad(return_path.c_str(), HBLOADER_EXIT_SENTINEL);
     }
 
+#ifdef VITA3K_SWITCH2
+    switch2_diagnostics_stop();
+#endif
     // Make the teardown diagnostics durable before hbloader replaces this NRO.
     if (auto logger = spdlog::default_logger())
         logger->flush();

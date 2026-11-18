@@ -173,6 +173,9 @@ glyph_load_setup font::get_glyph_files(language_class class_) const {
         }
         result.font_names.emplace_back(bold ? "ltn4.pvf" : "ltn0.pvf");
         // System fonts
+#ifdef __SWITCH__
+        result.font_names.emplace_back("SwitchStandard.ttf"); // the console's shared font
+#endif
         result.font_names.emplace_back("Arial.ttf");
         result.font_names.emplace_back("arial.ttf");
 #ifdef __APPLE__
